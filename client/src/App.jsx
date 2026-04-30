@@ -6,7 +6,12 @@ import AgentPlan from "./components/AgentPlan";
 import MemoryPanel from "./components/MemoryPanel";
 import "./App.css";
 
-const socket = io(import.meta.env.VITE_BACKEND_URL);
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "https://travel-ai-backend-tluf.onrender.com";
+
+const socket = io(BACKEND_URL, {
+  transports: ["websocket", "polling"]
+});
+
 
 function getSessionId() {
   let id = localStorage.getItem("travel_session_id");
@@ -114,7 +119,7 @@ export default function App() {
   // ── Saved Trips ──────────────────────────────────────────
   async function fetchSavedTrips() {
     try {
-      const res = await fetch(`http://localhost:5000/api/saved-trips/${SESSION_ID}`);
+      const res = await fetch(`${BACKEND_URL}/api/saved-trips/${SESSION_ID}`);
       if (!res.ok) throw new Error("fetch failed");
       const data = await res.json();
       setSavedTrips(Array.isArray(data) ? data : []);
@@ -129,7 +134,7 @@ export default function App() {
       return;
     }
     try {
-      const res = await fetch("http://localhost:5000/api/saved-trips", {
+      const res = await fetch(`${BACKEND_URL}/api/saved-trips`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -150,14 +155,14 @@ export default function App() {
 
   async function deleteTrip(id) {
     try {
-      await fetch(`http://localhost:5000/api/saved-trips/${id}`, { method: "DELETE" });
+      await fetch(`${BACKEND_URL}/api/saved-trips/${id}`, { method: "DELETE" });
       await fetchSavedTrips();
     } catch (err) { console.error("Failed to delete trip:", err); }
   }
 
   async function clearMemory() {
     try {
-      await fetch(`http://localhost:5000/api/memory/${SESSION_ID}`, { method: "DELETE" });
+      await fetch(`${BACKEND_URL}/api/memory/${SESSION_ID}`, { method: "DELETE" });
       setMemory(null);
     } catch (err) { console.error("Failed to clear memory:", err); }
   }

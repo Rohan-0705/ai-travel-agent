@@ -5,7 +5,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import axios from "axios";
 import mongoose from "mongoose";
-import cors from "cors";
+
 
 dotenv.config();
 
@@ -26,12 +26,12 @@ const io = new Server(server, {
       "http://localhost:5173",
       "https://ai-travel-agent-three.vercel.app"
     ],
-    methods: ["GET", "POST"],
-    credentials: true
+    methods: ["GET", "POST"]
   }
 });
 
 mongoose.set("bufferCommands", false);
+
 
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log("✅ MongoDB connected"))
@@ -441,10 +441,10 @@ io.on("connection", (socket) => {
   });
 
   socket.on("message", async ({ msg, sessionId }) => {
-    const userMessage = data.message || data;
+    // const userMessage = data.message || data;
 
-    const daysMatch = userMessage.match(/(\d+)\s*day/i);
-    const extractedDaysFromPrompt = daysMatch ? parseInt(daysMatch[1]) : 1;
+    // const daysMatch = userMessage.match(/(\d+)\s*day/i);
+    // const extractedDaysFromPrompt = daysMatch ? parseInt(daysMatch[1]) : 1;
     console.log("User:", msg);
     await Chat.create({ sessionId, role: "user", content: msg });
 
