@@ -30,12 +30,6 @@ const io = new Server(server, {
   }
 });
 
-mongoose.set("bufferCommands", false);
-
-
-mongoose.connect(process.env.MONGO_URI)
-  .then(() => console.log("✅ MongoDB connected"))
-  .catch(err => console.error("❌ MongoDB error:", err.message));
 const chatSchema = new mongoose.Schema({
   sessionId: String,
   role: String,
