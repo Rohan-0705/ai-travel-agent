@@ -6,7 +6,7 @@ import AgentPlan from "./components/AgentPlan";
 import MemoryPanel from "./components/MemoryPanel";
 import "./App.css";
 
-const socket = io("https://travel-ai-backend-tluf.onrender.com");
+const socket = io(import.meta.env.VITE_BACKEND_URL);
 
 function getSessionId() {
   let id = localStorage.getItem("travel_session_id");
