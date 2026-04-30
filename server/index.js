@@ -5,15 +5,31 @@ import cors from "cors";
 import dotenv from "dotenv";
 import axios from "axios";
 import mongoose from "mongoose";
+import cors from "cors";
 
 dotenv.config();
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: [
+    "http://localhost:5173",
+    "https://ai-travel-agent-three.vercel.app"
+  ],
+  credentials: true
+}));
 app.use(express.json());
 
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
+const io = new Server(server, {
+  cors: {
+    origin: [
+      "http://localhost:5173",
+      "https://ai-travel-agent-three.vercel.app"
+    ],
+    methods: ["GET", "POST"],
+    credentials: true
+  }
+});
 
 mongoose.set("bufferCommands", false);
 
