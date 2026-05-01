@@ -586,27 +586,28 @@ async function runPlannerAgent(msg, city, days, memory, conversation) {
     ? `Conversation so far:\n${conversation.text}`
     : "No earlier messages in this chat.";
 
-  const raw = await createJsonResponse({
-    maxOutputTokens: 600,
-    input: `Analyze this user request as JSON: ${msg}`,
-    instructions: `You are the PLANNER AGENT. Output ONLY valid JSON.
+  try {
+    const raw = await createJsonResponse({
+      maxOutputTokens: 600,
+      input: `Analyze this user request as JSON: ${msg}`,
+      instructions: `You are the PLANNER AGENT. Output ONLY valid JSON.
 ${memoryContext}
 ${conversationContext}
 Return exactly this JSON shape:
 {"intent":"...","city":"${city}","days":${days},"tools_needed":["getWeather","getPlaces","estimateCost"],"agent_sequence":["itinerary_agent","cost_agent"],"personalization":"...","reasoning":"..."}`
-  });
+    });
 
-  try {
     return parseJsonResponse(raw);
-  } catch {
+  } catch (err) {
+    console.warn("Planner Agent fallback:", err.response?.data || err.message);
     return {
       intent: `Plan ${days}-day trip to ${city}`,
       city,
       days,
       tools_needed: ["getWeather", "getPlaces", "estimateCost"],
       agent_sequence: ["itinerary_agent", "cost_agent"],
-      personalization: "None",
-      reasoning: "Standard trip planning flow."
+      personalization: "Using local fallback planning.",
+      reasoning: "Local fallback planning flow because the AI planner was unavailable."
     };
   }
 }
@@ -1027,10 +1028,12 @@ io.on("connection", (socket) => {
         ? placesData.map((place) => place.name).join(", ")
         : `iconic spots in ${city}`;
 
-      const raw = await createJsonResponse({
-        maxOutputTokens: 4000,
-        input: `Generate JSON for the complete ${days}-day itinerary for ${city}.`,
-        instructions: `You are the ITINERARY AGENT. Output ONLY valid JSON. No markdown.
+      let raw = "";
+      try {
+        raw = await createJsonResponse({
+          maxOutputTokens: 4000,
+          input: `Generate JSON for the complete ${days}-day itinerary for ${city}.`,
+          instructions: `You are the ITINERARY AGENT. Output ONLY valid JSON. No markdown.
 Destination: ${city}, India.
 Duration: ${days} days.
 Weather: ${weatherData.temp} C, ${weatherData.description}, humidity ${weatherData.humidity}%.
@@ -1049,7 +1052,10 @@ For every day include:
 - Include only taxi/auto/bus/local transport fare in Rs.
 - Do not mention hotel, stay, check-in, base stay, hotel price, food price, meal expense, or total daily expense inside day plans.
 Use exactly cost perDay=${costData.perDay}, total=${costData.total}.`
-      });
+        });
+      } catch (err) {
+        console.warn("Itinerary Agent fallback:", err.response?.data || err.message);
+      }
 
       let parsed;
       try {
@@ -1084,7 +1090,10 @@ Use exactly cost perDay=${costData.perDay}, total=${costData.total}.`
       socket.emit("reply_done");
     } catch (err) {
       console.error("ERROR:", err.response?.data || err.message);
-      socket.emit("reply_chunk", "An error occurred. Please try again.");
+      const detail = err.message?.includes("OPENROUTER_API_KEY")
+        ? "OpenRouter API key is missing on the backend."
+        : "The backend could not complete this request.";
+      socket.emit("reply_chunk", `${detail} Please check Render environment variables and logs.`);
       socket.emit("reply_done");
     }
   });
