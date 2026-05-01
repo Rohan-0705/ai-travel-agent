@@ -89,6 +89,19 @@ const app = express();
 app.use(cors({ origin: ALLOWED_ORIGINS, credentials: true }));
 app.use(express.json());
 
+app.get("/", (req, res) => {
+  res.json({
+    status: "ok",
+    service: "AI Travel Agent backend",
+    health: "/health",
+    socket: "/socket.io"
+  });
+});
+
+app.get("/health", (req, res) => {
+  res.json({ status: "ok" });
+});
+
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: ALLOWED_ORIGINS, methods: ["GET", "POST"] }
