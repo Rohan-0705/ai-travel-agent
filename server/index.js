@@ -25,6 +25,7 @@ const configuredOrigins = [
   process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "",
   ...(process.env.CLIENT_URLS || "").split(",")
 ]
+  .filter(Boolean)
   .map((origin) => origin.trim())
   .filter(Boolean);
 
