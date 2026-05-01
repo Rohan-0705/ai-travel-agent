@@ -13,11 +13,22 @@ const OPENROUTER_MODEL = configuredOpenRouterModel.startsWith("sk-")
   ? "openrouter/free"
   : (configuredOpenRouterModel || "openrouter/free");
 
-const ALLOWED_ORIGINS = [
+const DEFAULT_ALLOWED_ORIGINS = [
   "http://localhost:5173",
   "http://127.0.0.1:5173",
   "https://ai-travel-agent-three.vercel.app"
 ];
+
+const configuredOrigins = [
+  process.env.CLIENT_URL,
+  process.env.FRONTEND_URL,
+  process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "",
+  ...(process.env.CLIENT_URLS || "").split(",")
+]
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+const ALLOWED_ORIGINS = [...new Set([...DEFAULT_ALLOWED_ORIGINS, ...configuredOrigins])];
 
 async function createJsonResponse({ instructions, input, maxOutputTokens }) {
   if (!process.env.OPENROUTER_API_KEY) {
