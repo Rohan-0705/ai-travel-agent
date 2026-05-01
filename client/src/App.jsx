@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { io } from "socket.io-client";
 import Itinerary from "./components/Itinerary";
 import SavedTrips from "./components/SavedTrips";
@@ -6,21 +6,137 @@ import AgentPlan from "./components/AgentPlan";
 import MemoryPanel from "./components/MemoryPanel";
 import "./App.css";
 
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "https://travel-ai-backend-tluf.onrender.com";
+const isLocalHost = ["localhost", "127.0.0.1"].includes(window.location.hostname);
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL
+  || (isLocalHost ? `http://${window.location.hostname}:5000` : "https://travel-ai-backend-tluf.onrender.com");
 
 const socket = io(BACKEND_URL, {
-  transports: ["websocket", "polling"]
+  transports: ["polling", "websocket"]
 });
 
+function createId(prefix) {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
 
-function getSessionId() {
-  let id = localStorage.getItem("travel_session_id");
-  if (!id) { id = "session_" + Date.now(); localStorage.setItem("travel_session_id", id); }
+function getStoredId(key, prefix) {
+  let id = localStorage.getItem(key);
+  if (!id) {
+    id = createId(prefix);
+    localStorage.setItem(key, id);
+  }
   return id;
 }
-const SESSION_ID = getSessionId();
+
+const CLIENT_ID = getStoredId("travel_client_id", "client");
+
+function getInitialSessionId() {
+  return getStoredId("travel_session_id", "session");
+}
+
+function tryParseItinerary(content) {
+  if (typeof content !== "string") return "";
+
+  try {
+    const parsed = JSON.parse(content);
+    return parsed.summary ? `Plan ready: ${parsed.summary}` : content;
+  } catch {
+    const start = content.indexOf("{");
+    const end = content.lastIndexOf("}");
+
+    if (start !== -1 && end > start) {
+      try {
+        const parsed = JSON.parse(content.slice(start, end + 1));
+        if (parsed.summary) return `Plan ready: ${parsed.summary}`;
+      } catch {
+        // Fall through to the raw JSON guard below.
+      }
+    }
+
+    if (/\"(?:days|dayExpense|stayPlan|cost)\"/.test(content) || content.includes("dayExpense")) {
+      return "Plan ready. Open the trip plan below.";
+    }
+
+    return content;
+  }
+}
+
+function getLastItinerary(history) {
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const item = history[i];
+    if (item.role !== "assistant") continue;
+
+    try {
+      const parsed = JSON.parse(item.content);
+      if (parsed?.summary || parsed?.days?.length) return parsed;
+    } catch {
+      const content = item.content || "";
+      const start = content.indexOf("{");
+      const end = content.lastIndexOf("}");
+
+      if (start !== -1 && end > start) {
+        try {
+          const parsed = JSON.parse(content.slice(start, end + 1));
+          if (parsed?.summary || parsed?.days?.length) return parsed;
+        } catch {
+          // Ignore non-JSON assistant messages.
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+function formatConversationDate(value) {
+  if (!value) return "";
+  return new Date(value).toLocaleString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
+function ConversationHistory({ conversations, activeSessionId, loading, onNewChat, onSelect, onClose }) {
+  return (
+    <aside className="conversation-sidebar">
+      <div className="conversation-header">
+        <div>
+          <h3>Conversation History</h3>
+          <span>{conversations.length} chats</span>
+        </div>
+        <button className="close-btn" onClick={onClose} aria-label="Close history">x</button>
+      </div>
+
+      <button className="new-chat-panel-btn" onClick={onNewChat}>+ New Chat</button>
+
+      {loading && <p className="conversation-empty">Loading chats...</p>}
+
+      {!loading && conversations.length === 0 && (
+        <p className="conversation-empty">No old chats yet. Start a new trip plan.</p>
+      )}
+
+      <div className="conversation-list">
+        {conversations.map((chat) => (
+          <button
+            key={chat.sessionId}
+            className={`conversation-item ${chat.sessionId === activeSessionId ? "active" : ""}`}
+            onClick={() => onSelect(chat.sessionId)}
+          >
+            <span className="conversation-title">{chat.title || "New chat"}</span>
+            <span className="conversation-preview">{chat.preview || "No messages yet"}</span>
+            <span className="conversation-meta">
+              {formatConversationDate(chat.updatedAt)} · {chat.messageCount || 0} messages
+            </span>
+          </button>
+        ))}
+      </div>
+    </aside>
+  );
+}
 
 export default function App() {
+  const [sessionId, setSessionId] = useState(getInitialSessionId);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [status, setStatus] = useState("");
@@ -34,97 +150,172 @@ export default function App() {
   const [showSaved, setShowSaved] = useState(false);
   const [agentPlan, setAgentPlan] = useState(null);
   const [toolLog, setToolLog] = useState([]);
-  const [agentDone, setAgentDone] = useState(false);  // NEW: controls AgentPlan collapse
+  const [agentDone, setAgentDone] = useState(false);
   const [memory, setMemory] = useState(null);
   const [showMemory, setShowMemory] = useState(false);
+  const [conversations, setConversations] = useState([]);
+  const [showHistory, setShowHistory] = useState(true);
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+  const activeSessionRef = useRef(sessionId);
   const bottomRef = useRef(null);
   const recognitionRef = useRef(null);
+  const composerRef = useRef(null);
 
   useEffect(() => {
-    socket.emit("get_history", { sessionId: SESSION_ID });
-    socket.emit("get_memory", { sessionId: SESSION_ID });
-    fetchSavedTrips();
+    activeSessionRef.current = sessionId;
+    localStorage.setItem("travel_session_id", sessionId);
+  }, [sessionId]);
 
-    socket.on("history", (history) => {
-      const mapped = history.map(h => ({
-        role: h.role,
-        text: h.role === "assistant" ? tryParseItinerary(h.content) : h.content,
+  const fetchConversations = useCallback(async (targetSessionId = activeSessionRef.current) => {
+    setIsHistoryLoading(true);
+    try {
+      const params = new URLSearchParams({ currentSessionId: targetSessionId });
+      const res = await fetch(`${BACKEND_URL}/api/conversations/${CLIENT_ID}?${params.toString()}`);
+      if (!res.ok) throw new Error("conversation fetch failed");
+      const data = await res.json();
+      setConversations(Array.isArray(data) ? data : []);
+    } catch (err) {
+      console.error("Failed to fetch conversations:", err);
+      setConversations([]);
+    } finally {
+      setIsHistoryLoading(false);
+    }
+  }, []);
+
+  const fetchSavedTrips = useCallback(async (targetSessionId = activeSessionRef.current) => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/saved-trips/${targetSessionId}`);
+      if (!res.ok) throw new Error("fetch failed");
+      const data = await res.json();
+      setSavedTrips(Array.isArray(data) ? data : []);
+    } catch (err) {
+      console.error("Failed to fetch saved trips:", err);
+      setSavedTrips([]);
+    }
+  }, []);
+
+  const requestSessionData = useCallback((targetSessionId) => {
+    socket.emit("get_history", { sessionId: targetSessionId, clientId: CLIENT_ID });
+    socket.emit("get_memory", { sessionId: targetSessionId });
+    fetchSavedTrips(targetSessionId);
+    fetchConversations(targetSessionId);
+  }, [fetchConversations, fetchSavedTrips]);
+
+  const speakText = useCallback((text) => {
+    if (!window.speechSynthesis) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = "en-IN";
+    utterance.rate = 1;
+    utterance.onstart = () => setIsSpeaking(true);
+    utterance.onend = () => setIsSpeaking(false);
+    window.speechSynthesis.speak(utterance);
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => requestSessionData(sessionId), 0);
+    return () => window.clearTimeout(timer);
+  }, [sessionId, requestSessionData]);
+
+  useEffect(() => {
+    const handleHistory = (payload) => {
+      const history = Array.isArray(payload) ? payload : payload?.history || [];
+      const payloadSessionId = Array.isArray(payload) ? activeSessionRef.current : payload?.sessionId;
+
+      if (payloadSessionId && payloadSessionId !== activeSessionRef.current) return;
+
+      const mapped = history.map((item) => ({
+        role: item.role,
+        text: item.role === "assistant" ? tryParseItinerary(item.content) : item.content,
         isHistory: true
       }));
+
       setMessages(mapped);
-    });
+      setItinerary(getLastItinerary(history));
+      setPlaces([]);
+      setIsSaved(false);
+      fetchConversations(activeSessionRef.current);
+    };
 
-    socket.on("memory", (data) => setMemory(data && data.sessionId ? data : null));
-    socket.on("status", (msg) => setStatus(msg));
-    socket.on("places", (data) => setPlaces(data));
+    const handleMemory = (data) => setMemory(data && data.sessionId ? data : null);
+    const handleStatus = (msg) => setStatus(msg);
+    const handlePlaces = (data) => setPlaces(data);
 
-    socket.on("agent_plan", (plan) => {
+    const handleAgentPlan = (plan) => {
       setAgentPlan(plan);
       setAgentDone(false);
       setToolLog([]);
-    });
+    };
 
-    socket.on("tool_result", ({ tool, result }) => {
-      setToolLog(prev => [...prev, { tool, result, ts: Date.now() }]);
-    });
+    const handleToolResult = ({ tool, result }) => {
+      setToolLog((prev) => [...prev, { tool, result, ts: Date.now() }]);
+    };
 
-    socket.on("itinerary", (data) => {
+    const handleItinerary = (data) => {
       setItinerary(data);
       setIsSaved(false);
-      setAgentDone(true);   // triggers AgentPlan collapse animation
-      setMessages(prev => prev.filter(m => !m.streaming));
+      setAgentDone(true);
+      setMessages((prev) => prev.filter((message) => !message.streaming));
       if (data.summary) speakText(data.summary.slice(0, 200));
-    });
+    };
 
-    socket.on("reply_chunk", (chunk) => {
+    const handleReplyChunk = (chunk) => {
       setStatus("");
-      setMessages(prev => {
+      setMessages((prev) => {
         const last = prev[prev.length - 1];
         if (last?.role === "assistant" && last?.streaming) {
           return [...prev.slice(0, -1), { ...last, text: last.text + chunk }];
         }
         return [...prev, { role: "assistant", text: chunk, streaming: true }];
       });
-    });
+    };
 
-    socket.on("reply_done", () => {
+    const handleReplyDone = () => {
       setStatus("");
       setIsLoading(false);
-      setMessages(prev => {
+      setMessages((prev) => {
         const updated = [...prev];
-        const lastIdx = updated.map(m => m.streaming).lastIndexOf(true);
+        const lastIdx = updated.map((message) => message.streaming).lastIndexOf(true);
         if (lastIdx !== -1) updated[lastIdx] = { ...updated[lastIdx], streaming: false };
         return updated;
       });
-      socket.emit("get_memory", { sessionId: SESSION_ID });
-    });
+      socket.emit("get_memory", { sessionId: activeSessionRef.current });
+      fetchConversations(activeSessionRef.current);
+    };
 
-    socket.on("connect_error", () => {
+    const handleConnectError = () => {
       setIsLoading(false);
-      setStatus("⚠️ Connection lost. Please try again.");
-    });
+      setStatus("Connection lost. Please try again.");
+    };
+
+    socket.on("history", handleHistory);
+    socket.on("memory", handleMemory);
+    socket.on("status", handleStatus);
+    socket.on("places", handlePlaces);
+    socket.on("agent_plan", handleAgentPlan);
+    socket.on("tool_result", handleToolResult);
+    socket.on("itinerary", handleItinerary);
+    socket.on("reply_chunk", handleReplyChunk);
+    socket.on("reply_done", handleReplyDone);
+    socket.on("connect_error", handleConnectError);
 
     return () => {
-      socket.off("history"); socket.off("memory"); socket.off("status");
-      socket.off("places"); socket.off("agent_plan"); socket.off("tool_result");
-      socket.off("itinerary"); socket.off("reply_chunk"); socket.off("reply_done");
-      socket.off("connect_error");
+      socket.off("history", handleHistory);
+      socket.off("memory", handleMemory);
+      socket.off("status", handleStatus);
+      socket.off("places", handlePlaces);
+      socket.off("agent_plan", handleAgentPlan);
+      socket.off("tool_result", handleToolResult);
+      socket.off("itinerary", handleItinerary);
+      socket.off("reply_chunk", handleReplyChunk);
+      socket.off("reply_done", handleReplyDone);
+      socket.off("connect_error", handleConnectError);
     };
-  }, []);
+  }, [fetchConversations, speakText]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, status, itinerary]);
-
-  // ── Saved Trips ──────────────────────────────────────────
-  async function fetchSavedTrips() {
-    try {
-      const res = await fetch(`${BACKEND_URL}/api/saved-trips/${SESSION_ID}`);
-      if (!res.ok) throw new Error("fetch failed");
-      const data = await res.json();
-      setSavedTrips(Array.isArray(data) ? data : []);
-    } catch (err) { console.error("Failed to fetch saved trips:", err); setSavedTrips([]); }
-  }
 
   async function saveTrip() {
     if (!itinerary) return;
@@ -133,12 +324,13 @@ export default function App() {
       alert("Trip already saved!");
       return;
     }
+
     try {
       const res = await fetch(`${BACKEND_URL}/api/saved-trips`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          sessionId: SESSION_ID,
+          sessionId,
           city: itinerary.city || "Unknown",
           days: itinerary.days?.length || 0,
           summary: itinerary.summary,
@@ -148,23 +340,30 @@ export default function App() {
       });
       if (!res.ok) throw new Error("Save failed: " + res.status);
       setIsSaved(true);
-      await fetchSavedTrips();
-      socket.emit("get_memory", { sessionId: SESSION_ID });
-    } catch (err) { console.error("Failed to save trip:", err); alert("Could not save trip."); }
+      await fetchSavedTrips(sessionId);
+      socket.emit("get_memory", { sessionId });
+    } catch (err) {
+      console.error("Failed to save trip:", err);
+      alert("Could not save trip.");
+    }
   }
 
   async function deleteTrip(id) {
     try {
       await fetch(`${BACKEND_URL}/api/saved-trips/${id}`, { method: "DELETE" });
-      await fetchSavedTrips();
-    } catch (err) { console.error("Failed to delete trip:", err); }
+      await fetchSavedTrips(sessionId);
+    } catch (err) {
+      console.error("Failed to delete trip:", err);
+    }
   }
 
   async function clearMemory() {
     try {
-      await fetch(`${BACKEND_URL}/api/memory/${SESSION_ID}`, { method: "DELETE" });
+      await fetch(`${BACKEND_URL}/api/memory/${sessionId}`, { method: "DELETE" });
       setMemory(null);
-    } catch (err) { console.error("Failed to clear memory:", err); }
+    } catch (err) {
+      console.error("Failed to clear memory:", err);
+    }
   }
 
   function loadTrip(trip) {
@@ -175,18 +374,53 @@ export default function App() {
     setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
   }
 
-  function tryParseItinerary(content) {
-    try {
-      const p = JSON.parse(content);
-      return p.summary ? `📋 ${p.summary}` : content;
-    } catch { return content; }
+  function startNewChat() {
+    if (isLoading) return;
+    const nextSessionId = createId("session");
+    setInput("");
+    setMessages([]);
+    setStatus("");
+    setPlaces([]);
+    setItinerary(null);
+    setIsSaved(false);
+    setAgentPlan(null);
+    setAgentDone(false);
+    setToolLog([]);
+    setIsLoading(false);
+    setMemory(null);
+    setSavedTrips([]);
+    setShowSaved(false);
+    setShowMemory(false);
+    setSessionId(nextSessionId);
+    if (window.innerWidth <= 720) setShowHistory(false);
+  }
+
+  function openConversation(nextSessionId) {
+    if (!nextSessionId || nextSessionId === sessionId || isLoading) return;
+    setInput("");
+    setMessages([]);
+    setStatus("");
+    setPlaces([]);
+    setItinerary(null);
+    setIsSaved(false);
+    setAgentPlan(null);
+    setAgentDone(false);
+    setToolLog([]);
+    setIsLoading(false);
+    setMemory(null);
+    setSavedTrips([]);
+    setShowSaved(false);
+    setShowMemory(false);
+    setSessionId(nextSessionId);
+    if (window.innerWidth <= 720) setShowHistory(false);
   }
 
   function sendMessage() {
     const text = input.trim();
     if (!text || isLoading) return;
-    setMessages(prev => [...prev, { role: "user", text }]);
+    setMessages((prev) => [...prev, { role: "user", text }]);
     setInput("");
+    if (composerRef.current) composerRef.current.style.height = "";
     setItinerary(null);
     setPlaces([]);
     setIsSaved(false);
@@ -194,67 +428,94 @@ export default function App() {
     setAgentDone(false);
     setToolLog([]);
     setIsLoading(true);
-    setStatus("🧠 Understanding your request...");
-    socket.emit("message", { msg: text, sessionId: SESSION_ID });
+    setStatus("Understanding your request...");
+    socket.emit("message", { msg: text, sessionId, clientId: CLIENT_ID });
   }
 
-  // ── Voice ────────────────────────────────────────────────
   function startListening() {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) { alert("Voice not supported in this browser"); return; }
-    const r = new SR();
-    r.lang = "en-IN"; r.continuous = false; r.interimResults = false;
-    r.onstart = () => setIsListening(true);
-    r.onend = () => setIsListening(false);
-    r.onresult = (e) => setInput(e.results[0][0].transcript);
-    recognitionRef.current = r;
-    r.start();
-  }
-  function stopListening() { recognitionRef.current?.stop(); setIsListening(false); }
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      alert("Voice not supported in this browser");
+      return;
+    }
 
-  function speakText(text) {
-    if (!window.speechSynthesis) return;
-    window.speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
-    u.lang = "en-IN"; u.rate = 1;
-    u.onstart = () => setIsSpeaking(true);
-    u.onend = () => setIsSpeaking(false);
-    window.speechSynthesis.speak(u);
+    const recognition = new SpeechRecognition();
+    recognition.lang = "en-IN";
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognition.onstart = () => setIsListening(true);
+    recognition.onend = () => setIsListening(false);
+    recognition.onresult = (event) => setInput(event.results[0][0].transcript);
+    recognitionRef.current = recognition;
+    recognition.start();
   }
-  function stopSpeaking() { window.speechSynthesis.cancel(); setIsSpeaking(false); }
+
+  function stopListening() {
+    recognitionRef.current?.stop();
+    setIsListening(false);
+  }
+
+  function stopSpeaking() {
+    window.speechSynthesis.cancel();
+    setIsSpeaking(false);
+  }
 
   return (
     <div className="app">
       <header className="header">
-        <span>✈️ AI Travel Agent</span>
+        <div className="brand-row">
+          <button className="history-toggle-btn" onClick={() => setShowHistory((value) => !value)}>
+            History
+          </button>
+          <span className="brand-title">AI Travel Agent</span>
+        </div>
+
         <div className="header-actions">
+          <button className="new-chat-btn" onClick={startNewChat} disabled={isLoading}>New Chat</button>
           {isSpeaking && (
-            <button className="stop-speak-btn" onClick={stopSpeaking}>🔇 Stop</button>
+            <button className="stop-speak-btn" onClick={stopSpeaking}>Stop</button>
           )}
           {memory && (
-            <button className="memory-btn" onClick={() => setShowMemory(s => !s)} title="Your travel memory">
-              🧠 Memory {memory.pastTrips?.length > 0 && <span className="badge">{memory.pastTrips.length}</span>}
+            <button className="memory-btn" onClick={() => setShowMemory((value) => !value)} title="Your travel memory">
+              Memory {memory.pastTrips?.length > 0 && <span className="badge">{memory.pastTrips.length}</span>}
             </button>
           )}
           <button
             className="saved-toggle-btn"
-            onClick={() => { setShowSaved(s => !s); fetchSavedTrips(); }}
+            onClick={() => { setShowSaved((value) => !value); fetchSavedTrips(sessionId); }}
           >
-            🔖 Saved {savedTrips.length > 0 && <span className="badge">{savedTrips.length}</span>}
+            Saved {savedTrips.length > 0 && <span className="badge">{savedTrips.length}</span>}
           </button>
         </div>
       </header>
 
       <div className="main-layout">
-        <div className="chat-area">
-          {messages.map((m, i) => (
-            <div key={i} className={`bubble ${m.role}`}>
-              <span className="bubble-icon">{m.role === "user" ? "🧑" : "🤖"}</span>
-              <p>{m.text}{m.streaming && <span className="cursor">▋</span>}</p>
+        {showHistory && (
+          <ConversationHistory
+            conversations={conversations}
+            activeSessionId={sessionId}
+            loading={isHistoryLoading}
+            onNewChat={startNewChat}
+            onSelect={openConversation}
+            onClose={() => setShowHistory(false)}
+          />
+        )}
+
+        <main className="chat-area">
+          {messages.length === 0 && !isLoading && !itinerary && (
+            <div className="empty-chat">
+              <h2>Where should we plan next?</h2>
+              <p>Start a new trip, or open an old conversation from History to resume it.</p>
+            </div>
+          )}
+
+          {messages.map((message, index) => (
+            <div key={`${message.role}-${index}`} className={`bubble ${message.role}`}>
+              <span className="bubble-icon">{message.role === "user" ? "You" : "AI"}</span>
+              <p>{message.text}{message.streaming && <span className="cursor">|</span>}</p>
             </div>
           ))}
 
-          {/* AgentPlan — visible while loading, collapses when done */}
           {agentPlan && isLoading && (
             <AgentPlan plan={agentPlan} toolLog={toolLog} done={agentDone} />
           )}
@@ -271,7 +532,7 @@ export default function App() {
           )}
 
           <div ref={bottomRef} />
-        </div>
+        </main>
 
         {showMemory && memory && (
           <MemoryPanel memory={memory} onClear={clearMemory} onClose={() => setShowMemory(false)} />
@@ -294,21 +555,33 @@ export default function App() {
           disabled={isLoading}
           title="Voice input"
         >
-          {isListening ? "🔴" : "🎙️"}
+          {isListening ? "Stop" : "Mic"}
         </button>
-        <input
+        <textarea
+          ref={composerRef}
+          className="composer-input"
           value={input}
-          onChange={e => setInput(e.target.value)}
-          onKeyDown={e => e.key === "Enter" && sendMessage()}
+          onChange={(event) => {
+            setInput(event.target.value);
+            event.target.style.height = "auto";
+            event.target.style.height = `${Math.min(event.target.scrollHeight, 120)}px`;
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              sendMessage();
+            }
+          }}
           placeholder='Try: "Plan a 3-day trip to Goa"'
           disabled={isLoading}
+          rows={1}
         />
         <button
           className={`send-btn ${isLoading ? "loading" : ""}`}
           onClick={sendMessage}
           disabled={isLoading}
         >
-          {isLoading ? "⏳" : "Send ➤"}
+          {isLoading ? "Wait" : "Send"}
         </button>
       </div>
     </div>

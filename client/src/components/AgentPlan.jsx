@@ -31,6 +31,11 @@ export default function AgentPlan({ plan, toolLog, done }) {
   const toolsDone = toolLog.map(t => t.tool);
   const allTools  = plan.tools_needed   || [];
   const allAgents = plan.agent_sequence || [];
+  const getTravelPerDay = (result) =>
+    result?.transportPerDay
+    || (result?.requestedDays ? Math.round((result?.breakdown?.transport || 0) / result.requestedDays) : 0)
+    || result?.breakdown?.transport
+    || 0;
 
   // Only show personalisation when it's a real, meaningful sentence
   const showPersonalization =
@@ -73,7 +78,7 @@ export default function AgentPlan({ plan, toolLog, done }) {
                     <span className="flow-result">
                       {tool === "getWeather"   && `${result.temp}°C, ${result.description}`}
                       {tool === "getPlaces"    && `${result.length} places found`}
-                      {tool === "estimateCost" && `₹${result.perDay?.toLocaleString("en-IN")}/day`}
+                      {tool === "estimateCost" && `₹${getTravelPerDay(result).toLocaleString("en-IN")}/day travel`}
                     </span>
                   )}
                   <span className={`flow-status ${isDone ? "check" : "dot"}`}>{isDone ? "✓" : "·"}</span>
@@ -124,7 +129,7 @@ export default function AgentPlan({ plan, toolLog, done }) {
                   )}
                   {tool === "estimateCost" && (
                     <span className="tool-log-value">
-                      ₹{result.perDay?.toLocaleString("en-IN")}/day · Total ₹{result.total?.toLocaleString("en-IN")}
+                      Local travel ₹{getTravelPerDay(result).toLocaleString("en-IN")}/day · Total ₹{result.breakdown?.transport?.toLocaleString("en-IN")}
                       {result.travelStyle ? ` · ${result.travelStyle}` : ""}
                     </span>
                   )}
